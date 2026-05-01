@@ -3,19 +3,31 @@ channels:
   - pytorch
   - nvidia
   - conda-forge
+
 dependencies:
-  - python>=3.9
+  - python=3.11
+  - pip
+
+  # CUDA-enabled PyTorch stack
   - pytorch
-  - pytorch-lightning
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.1
+
+  # Core scientific stack
   - numpy
   - pandas
   - matplotlib
   - scikit-learn
+  - scipy
   - biopython
   - tqdm
   - sentencepiece
-  - pip
+
+  # Training/logging
+  - pytorch-lightning
+  - torchmetrics
+
   - pip:
       - transformers
       - wandb
-      - torchmetrics

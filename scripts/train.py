@@ -4,12 +4,13 @@ Train GLOBAL TF–DNA Binding Predictor
 """
 
 import os, sys, random, argparse, gc
-#os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 import numpy as np
 import torch
 import pandas as pd
 import pytorch_lightning as pl
+import torchvision
+import torchmetrics
 
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import (
@@ -28,6 +29,29 @@ from src.utils import (
 )
 from src.model import LitDNABindingModel
 
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+logging.info("python:", sys.version)
+logging.info("torch:", torch.__version__)
+logging.info("torchvision:", torchvision.__version__)
+logging.info("torchmetrics:", torchmetrics.__version__)
+logging.info("lightning:", pl.__version__)
+logging.info("torch.version.cuda:", torch.version.cuda)
+logging.info("cuda available:", torch.cuda.is_available())
+logging.info("device count:", torch.cuda.device_count())
+
+logging.info(f"CUDA Available: {torch.cuda.is_available()}")
+logging.info(f"Device Count: {torch.cuda.device_count()}")
+logging.info("device 0:", torch.cuda.get_device_name(0))
+logging.info(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES')}")
 
 ########################################
 # Deterministic Behavior
@@ -102,7 +126,7 @@ def main():
     # -------------------------------------------------------
     # Load datasets (.npy)
     # -------------------------------------------------------
-    print("[INFO] Loading .npy datasets...")
+    logging.info("Loading .npy datasets...")
 
     train_dna = np.load(args.train_dna_npy, mmap_mode="r")
     train_labels = np.load(args.train_labels_npy, mmap_mode="r")
@@ -113,20 +137,20 @@ def main():
     #test_dna = np.load(args.test_dna_npy, mmap_mode="r") if args.test_dna_npy else None
     #test_labels = np.load(args.test_labels_npy, mmap_mode="r") if args.test_labels_npy else None
 
-
     # -------------------------------------------------------
     # Load TF names & embeddings
     # -------------------------------------------------------
-    print("[INFO] Loading metadata...")
+    logging.info("Loading metadata...")
     meta = pd.read_csv(args.train_metadata_tsv, sep="\t")
     tf_names = meta["TF/DNase/HistoneMark"].tolist()
 
-    print("[INFO] Loading TF embeddings...")
+    logging.info("Loading TF embeddings...")
     tf_embs, canon_names = load_tf_embeddings_in_label_order(tf_names, args.embedding_dir)
 
     # -------------------------------------------------------
     # DataModule
     # -------------------------------------------------------
+    logging.info("Setting up TFBindDataModule...")
     dm = TFBindDataModule(
         train_dna=train_dna,
         train_labels=train_labels,
@@ -151,6 +175,7 @@ def main():
     # -------------------------------------------------------
     # Model
     # -------------------------------------------------------
+    logging.info("Setting up LitDNABindingModel...")
     model = LitDNABindingModel(
         lr=args.lr,
         weight_decay=args.weight_decay,
@@ -161,9 +186,9 @@ def main():
 
     #model.set_global_pos_weight(dm)
 
-    print("\n====== Model Summary ======")
-    print(model)
-    print("===========================\n")
+    logging.info("\n====== Model Summary ======")
+    logging.info(model)
+    logging.info("===========================\n")
 
     # -------------------------------------------------------
     # Callbacks
@@ -221,7 +246,7 @@ def main():
     # TRAIN
     # -------------------------------------------------------
     trainer.fit(model, datamodule=dm)
-    print("\nTraining complete!\n")
+    logging.info("\nTraining complete!\n")
 
     # -------------------------------------------------------
 

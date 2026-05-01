@@ -5,6 +5,13 @@ import torch
 from Bio import SeqIO
 from transformers import T5Tokenizer, T5EncoderModel
 
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 
 def embedding_features(seq_1d, seq_3di, device):
     d1 = len(seq_1d)
@@ -86,14 +93,15 @@ def main():
         args.device if torch.cuda.is_available() else "cpu"
     )
 
+    os.makedirs(args.aa_dir, exist_ok=True)
     os.makedirs(args.out_dir, exist_ok=True)
 
     # Load all 3Di sequences
+    logging.info(f"Loading 3Di sequences from {args.di_fasta}")
     di_dict = {
         rec.id.split()[0]: str(rec.seq)
         for rec in SeqIO.parse(args.di_fasta, "fasta")
     }
-
     for fname in os.listdir(args.aa_dir):
         if not fname.endswith(".fasta"):
             continue
@@ -102,7 +110,7 @@ def main():
         aa_path = os.path.join(args.aa_dir, fname)
 
         if tf_id not in di_dict:
-            print(f"⚠️  No 3Di for {tf_id}, skipping")
+            logging.warning(f"No 3Di for {tf_id}, skipping")
             continue
 
         aa_seq = str(next(SeqIO.parse(aa_path, "fasta")).seq)
@@ -115,7 +123,9 @@ def main():
         )
         torch.save(emb, out_path)
 
-        print(f" Saved {tf_id}: {tuple(emb.shape)} → {out_path}")
+        logging.info(f"Saved {tf_id}: {tuple(emb.shape)} → {out_path}")
+        
+    logging.info("\nAll done!")
 
 
 if __name__ == "__main__":
