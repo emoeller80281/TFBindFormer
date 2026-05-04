@@ -26,11 +26,11 @@ export NVIDIA_TF32_OVERRIDE=1
 
 # --- Threading: set to match SLURM CPUs per task ---
 THREADS=${SLURM_CPUS_PER_TASK:-1}
-export OMP_NUM_THREADS=$THREADS
-export MKL_NUM_THREADS=$THREADS
-export OPENBLAS_NUM_THREADS=$THREADS
-export NUMEXPR_NUM_THREADS=$THREADS
-export BLIS_NUM_THREADS=$THREADS
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export BLIS_NUM_THREADS=1
 export KMP_AFFINITY=granularity=fine,compact,1,0
 
 # --- NCCL / networking overrides ---
@@ -84,7 +84,8 @@ NPROC_PER_NODE=${SLURM_GPUS_ON_NODE:-$(nvidia-smi -L | wc -l)}
 echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
 
 # Launch torchrun on ALL nodes / tasks via srun
-srun python ${PROJECT_DIR}/scripts/train.py \
+srun --cpus-per-task=${SLURM_CPUS_PER_TASK} --cpu-bind=cores \
+  python ${PROJECT_DIR}/scripts/train.py \
   --train_dna_npy ${PROJECT_DIR}/data/dna_data/train/train_oneHot.npy \
   --train_labels_npy ${PROJECT_DIR}/data/dna_data/train/train_labels.npy \
   --train_metadata_tsv ${PROJECT_DIR}/data/tf_data/metadata_tfbs.tsv \
@@ -93,10 +94,10 @@ srun python ${PROJECT_DIR}/scripts/train.py \
   --val_metadata_tsv ${PROJECT_DIR}/data/tf_data/metadata_tfbs.tsv \
   --embedding_dir ${PROJECT_DIR}/data/tf_data/tf_embeddings_test \
   --epochs 20 \
-  --batch_size 1024 \
-  --num_workers 4 \
+  --batch_size 256 \
+  --num_workers 1 \
   --lr 1e-4 \
   --neg_fraction 0.015 \
   --wandb_project tfbind-train \
-  --run_name tfbind_train_ddp_${SLURM_JOB_ID} \
-  --output_dir ${PROJECT_DIR}/checkpoints/tfbind_train_ddp
+  --run_name tfbind_train_${SLURM_JOB_ID} \
+  --output_dir ${PROJECT_DIR}/checkpoints/tfbind_train

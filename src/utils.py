@@ -171,13 +171,11 @@ def build_sample_indices(labels, neg_fraction=0.001, seed=2024):
 # ============================================================
 
 class TFTargetDataset(Dataset):
-    """DNA + TF embedding + label"""
-
     def __init__(self, dna_data, tf_embs, labels, sample_indices):
-        self.dna_data = dna_data       # numpy array (N,1000,4)
-        self.tf_embs = tf_embs         # list of embeddings
-        self.labels = labels           # numpy array (N,T)
-        self.samples = sample_indices  # array of (dna_idx, tf_idx)
+        self.dna_data = torch.as_tensor(dna_data, dtype=torch.float32)
+        self.tf_embs = tf_embs
+        self.labels = torch.as_tensor(labels, dtype=torch.float32)
+        self.samples = sample_indices
 
     def __len__(self):
         return len(self.samples)
@@ -185,9 +183,9 @@ class TFTargetDataset(Dataset):
     def __getitem__(self, idx):
         dna_i, tf_j = self.samples[idx]
 
-        dna = torch.tensor(self.dna_data[dna_i], dtype=torch.float32)
-        tf_emb = self.tf_embs[tf_j]  # tensor (L,512)
-        label = float(self.labels[dna_i, tf_j])
+        dna = self.dna_data[dna_i]
+        tf_emb = self.tf_embs[tf_j]
+        label = self.labels[dna_i, tf_j]
 
         return dna, tf_emb, label, tf_j
 

@@ -9,6 +9,7 @@ import torch.nn.functional as F
 import pytorch_lightning as pl
 import numpy as np
 import pandas as pd
+import time
 
 import matplotlib.pyplot as plt
 import wandb
@@ -104,7 +105,6 @@ class LitDNABindingModel(pl.LightningModule):
 
         self.best_threshold = None
 
-
     # ----------------------------------------------------------
 
 
@@ -182,6 +182,22 @@ class LitDNABindingModel(pl.LightningModule):
         self.val_auprc.update(probs.detach(), labels.int())
 
         return loss
+    
+    def on_train_batch_start(self, batch, batch_idx):
+        self._batch_start_time = time.time()
+
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        if hasattr(self, "_batch_start_time"):
+            step_time = time.time() - self._batch_start_time
+
+            self.log(
+                "train/step_time_sec",
+                step_time,
+                on_step=True,
+                on_epoch=False,
+                prog_bar=False,
+                sync_dist=True,
+            )
 
     # ----------------------------------------------------------
     # VALIDATION — threshold sweep + PR/ROC logging
