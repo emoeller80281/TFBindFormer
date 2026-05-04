@@ -2,12 +2,12 @@
 #SBATCH --job-name=train_tfbindformer
 #SBATCH --output=LOGS/train_tfbindformer/%x_%j.log
 #SBATCH --error=LOGS/train_tfbindformer/%x_%j.err
-#SBATCH --time=12:00:00
+#SBATCH --time=36:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:v100:1
-#SBATCH --ntasks-per-node=1
-#SBATCH -c 12
+#SBATCH --gres=gpu:a100:4
+#SBATCH --ntasks-per-node=4
+#SBATCH -c 16
 #SBATCH --mem=64G
 
 set -eo pipefail
@@ -84,26 +84,19 @@ NPROC_PER_NODE=${SLURM_GPUS_ON_NODE:-$(nvidia-smi -L | wc -l)}
 echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
 
 # Launch torchrun on ALL nodes / tasks via srun
-srun bash -c "torchrun \
-  --nnodes=$SLURM_NNODES \
-  --nproc_per_node=$NPROC_PER_NODE \
-  --node_rank=\$SLURM_NODEID \
-  --rdzv_id=$SLURM_JOB_ID \
-  --rdzv_backend=c10d \
-  --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
-  ${PROJECT_DIR}/scripts/train.py \
-    --train_dna_npy ${PROJECT_DIR}/data/dna_data/train/train_oneHot.npy \
-    --train_labels_npy ${PROJECT_DIR}/data/dna_data/train/train_labels.npy \
-    --train_metadata_tsv ${PROJECT_DIR}/data/tf_data/metadata_tfbs.tsv \
-    --val_dna_npy ${PROJECT_DIR}/data/dna_data/val/valid_oneHot.npy \
-    --val_labels_npy ${PROJECT_DIR}/data/dna_data/val/valid_labels.npy \
-    --val_metadata_tsv ${PROJECT_DIR}/data/tf_data/metadata_tfbs.tsv \
-    --embedding_dir ${PROJECT_DIR}/data/tf_data/tf_embeddings_test \
-    --epochs 20 \
-    --batch_size 1024 \
-    --num_workers 4 \
-    --lr 1e-4 \
-    --neg_fraction 0.015 \
-    --wandb_project tfbind-train \
-    --run_name tfbind_train \
-    --output_dir ${PROJECT_DIR}/checkpoints/tfbind_train"
+srun python ${PROJECT_DIR}/scripts/train.py \
+  --train_dna_npy ${PROJECT_DIR}/data/dna_data/train/train_oneHot.npy \
+  --train_labels_npy ${PROJECT_DIR}/data/dna_data/train/train_labels.npy \
+  --train_metadata_tsv ${PROJECT_DIR}/data/tf_data/metadata_tfbs.tsv \
+  --val_dna_npy ${PROJECT_DIR}/data/dna_data/val/valid_oneHot.npy \
+  --val_labels_npy ${PROJECT_DIR}/data/dna_data/val/valid_labels.npy \
+  --val_metadata_tsv ${PROJECT_DIR}/data/tf_data/metadata_tfbs.tsv \
+  --embedding_dir ${PROJECT_DIR}/data/tf_data/tf_embeddings_test \
+  --epochs 20 \
+  --batch_size 1024 \
+  --num_workers 1 \
+  --lr 1e-4 \
+  --neg_fraction 0.015 \
+  --wandb_project tfbind-train \
+  --run_name tfbind_train_ddp \
+  --output_dir ${PROJECT_DIR}/checkpoints/tfbind_train_ddp

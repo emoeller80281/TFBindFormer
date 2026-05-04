@@ -150,7 +150,7 @@ class LitDNABindingModel(pl.LightningModule):
         prot, mask = self._pad_proteins(tf_embs, dna.device)
         logits = self.model(dna, prot, protein_mask=mask).squeeze(-1)
         loss = self.loss_fn(logits, labels.float())
-        self.log("train/loss", loss, on_epoch=True, batch_size=dna.size(0))
+        self.log("train/loss", loss, on_epoch=True, batch_size=dna.size(0), sync_dist=True)
         return loss
 
 
@@ -161,7 +161,7 @@ class LitDNABindingModel(pl.LightningModule):
         logits = self.model(dna, prot, protein_mask=mask).squeeze(-1)
 
         loss = self.loss_fn(logits, labels.float())
-        self.log("val/loss", loss, on_epoch=True, prog_bar=True, batch_size=dna.size(0))
+        self.log("val/loss", loss, on_epoch=True, prog_bar=True, batch_size=dna.size(0), sync_dist=True)
 
         self.val_logits.append(torch.sigmoid(logits).detach().cpu())
         self.val_targets.append(labels.detach().cpu())
@@ -184,8 +184,8 @@ class LitDNABindingModel(pl.LightningModule):
         # AUROC / AUPRC
         auroc = BinaryAUROC()(probs, targets)
         auprc = BinaryAveragePrecision()(probs, targets)
-        self.log("val/roc_auc", auroc, prog_bar=True)
-        self.log("val/pr_auc", auprc, prog_bar=True)
+        self.log("val/roc_auc", auroc, prog_bar=True, sync_dist=True)
+        self.log("val/pr_auc", auprc, prog_bar=True, sync_dist=True)
 
         # Threshold sweep
         thresholds = torch.linspace(0.0, 0.3, steps=301)
@@ -210,10 +210,10 @@ class LitDNABindingModel(pl.LightningModule):
                 best_r = float(recall)
 
         self.best_threshold = best_t
-        self.log("val/best_f1", best_f1, prog_bar=True)
-        self.log("val/best_precision", best_p)
-        self.log("val/best_recall", best_r)
-        self.log("val/best_threshold", best_t)
+        self.log("val/best_f1", best_f1, prog_bar=True, sync_dist=True)
+        self.log("val/best_precision", best_p, sync_dist=True)
+        self.log("val/best_recall", best_r, sync_dist=True)
+        self.log("val/best_threshold", best_t, sync_dist=True)
 
         # PR / ROC curves to W&B
         try:
@@ -254,7 +254,7 @@ class LitDNABindingModel(pl.LightningModule):
         loss = self.loss_fn(logits, labels.float())
 
         # log
-        self.log("test/loss", loss, on_step=False, on_epoch=True)
+        self.log("test/loss", loss, on_step=False, on_epoch=True, sync_dist=True)
         return loss
 
     

@@ -19,6 +19,7 @@ from pytorch_lightning.callbacks import (
     EarlyStopping,
 )
 from pytorch_lightning.callbacks import TQDMProgressBar
+from pytorch_lightning.utilities import rank_zero_info, rank_zero_debug
 
 # local modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -31,27 +32,32 @@ from src.model import LitDNABindingModel
 
 import logging
 
+logging.debug("\n ===== PyTorch and CUDA Info =====")
+logging.debug(f"python: {sys.version}")
+logging.debug(f"torch: {torch.__version__}")
+logging.debug(f"torchvision: {torchvision.__version__}")
+logging.debug(f"torchmetrics: {torchmetrics.__version__}")
+logging.debug(f"lightning: {pl.__version__}")
+logging.debug(f"torch.version.cuda: {torch.version.cuda}")
+logging.debug(f"CUDA Available: {torch.cuda.is_available()}")
+logging.debug(f"Device Count: {torch.cuda.device_count()}")
+logging.debug(f"device 0: {torch.cuda.get_device_name(0)}")
+logging.debug(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES')}")
+logging.debug("=================================\n")
+
+# Get the global rank from the environment (defaults to 0 if not running in DDP yet)
+global_rank = int(os.environ.get("GLOBAL_RANK", 0))
+
+# Only rank 0 gets INFO/DEBUG, others get only WARNING or above
+log_level = logging.INFO if global_rank == 0 else logging.WARNING
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=log_level,
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout)
     ]
 )
-
-logging.info("python:", sys.version)
-logging.info("torch:", torch.__version__)
-logging.info("torchvision:", torchvision.__version__)
-logging.info("torchmetrics:", torchmetrics.__version__)
-logging.info("lightning:", pl.__version__)
-logging.info("torch.version.cuda:", torch.version.cuda)
-logging.info("cuda available:", torch.cuda.is_available())
-logging.info("device count:", torch.cuda.device_count())
-
-logging.info(f"CUDA Available: {torch.cuda.is_available()}")
-logging.info(f"Device Count: {torch.cuda.device_count()}")
-logging.info("device 0:", torch.cuda.get_device_name(0))
-logging.info(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES')}")
 
 ########################################
 # Deterministic Behavior
@@ -126,7 +132,7 @@ def main():
     # -------------------------------------------------------
     # Load datasets (.npy)
     # -------------------------------------------------------
-    logging.info("Loading .npy datasets...")
+    logging.debug("Loading .npy datasets...")
 
     train_dna = np.load(args.train_dna_npy, mmap_mode="r")
     train_labels = np.load(args.train_labels_npy, mmap_mode="r")
@@ -140,17 +146,17 @@ def main():
     # -------------------------------------------------------
     # Load TF names & embeddings
     # -------------------------------------------------------
-    logging.info("Loading metadata...")
+    rank_zero_info("Loading metadata...")
     meta = pd.read_csv(args.train_metadata_tsv, sep="\t")
     tf_names = meta["TF/DNase/HistoneMark"].tolist()
 
-    logging.info("Loading TF embeddings...")
+    rank_zero_info("Loading TF embeddings...")
     tf_embs, canon_names = load_tf_embeddings_in_label_order(tf_names, args.embedding_dir)
 
     # -------------------------------------------------------
     # DataModule
     # -------------------------------------------------------
-    logging.info("Setting up TFBindDataModule...")
+    rank_zero_info("Setting up TFBindDataModule...")
     dm = TFBindDataModule(
         train_dna=train_dna,
         train_labels=train_labels,
@@ -175,7 +181,7 @@ def main():
     # -------------------------------------------------------
     # Model
     # -------------------------------------------------------
-    logging.info("Setting up LitDNABindingModel...")
+    rank_zero_info("Setting up LitDNABindingModel...")
     model = LitDNABindingModel(
         lr=args.lr,
         weight_decay=args.weight_decay,
@@ -186,9 +192,9 @@ def main():
 
     #model.set_global_pos_weight(dm)
 
-    logging.info("\n====== Model Summary ======")
-    logging.info(model)
-    logging.info("===========================\n")
+    rank_zero_info("\n====== Model Summary ======")
+    rank_zero_info(model)
+    rank_zero_info("===========================\n")
 
     # -------------------------------------------------------
     # Callbacks
@@ -213,6 +219,7 @@ def main():
     # -------------------------------------------------------
     # W&B logger
     # -------------------------------------------------------
+    rank_zero_info("Setting up ")
     wandb_logger = None
     if args.wandb_project:
         wandb_logger = WandbLogger(
@@ -229,8 +236,8 @@ def main():
         max_epochs=args.epochs,
         precision=args.precision,
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        devices=1,
-        strategy="auto",
+        devices=4,
+        strategy="ddp_find_unused_parameters_true",
         logger=wandb_logger,
         callbacks=[TQDMProgressBar(refresh_rate=2000)] + callbacks,
         log_every_n_steps=2000,
@@ -246,7 +253,7 @@ def main():
     # TRAIN
     # -------------------------------------------------------
     trainer.fit(model, datamodule=dm)
-    logging.info("\nTraining complete!\n")
+    rank_zero_info("\nTraining complete!\n")
 
     # -------------------------------------------------------
 

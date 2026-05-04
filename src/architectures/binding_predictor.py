@@ -161,9 +161,6 @@ class DNABindingPredictor(nn.Module):
                 return_attention=False,
             )
 
-
-
-
         # ----- 4. Position-weighted pooling over DNA -----
         pooled = self.pool(dna_out, mask=dna_mask)   # (B,d_model)
 
