@@ -15,6 +15,8 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import pytorch_lightning as pl
 
+from torch.nn.utils.rnn import pad_sequence
+
 
 # ============================================================
 # 1. TF ALIAS MAPPING (ONLY these should be canonicalized)
@@ -194,12 +196,36 @@ class TFTargetDataset(Dataset):
 # 5. COLLATE FUNCTION
 # ============================================================
 
+
 def tfbind_collate(batch):
-    dna_batch = torch.stack([x[0] for x in batch])   # (B,1000,4)
-    tf_emb_list = [x[1] for x in batch]              # list[B] of (L,512)
-    labels = torch.tensor([x[2] for x in batch]).float()
-    tf_idx = torch.tensor([x[3] for x in batch]).long()
-    return dna_batch, tf_emb_list, labels, tf_idx
+    dna_batch = torch.stack([x[0] for x in batch])  # (B, 1000, 4)
+
+    tf_emb_list = [
+        x[1].squeeze(0) if x[1].ndim == 3 else x[1]
+        for x in batch
+    ]
+
+    labels = torch.tensor([x[2] for x in batch], dtype=torch.float32)
+    tf_idx = torch.tensor([x[3] for x in batch], dtype=torch.long)
+
+    # Pad TF embeddings on CPU inside DataLoader workers
+    prot_batch = pad_sequence(
+        tf_emb_list,
+        batch_first=True,
+        padding_value=0.0,
+    )  # (B, Lmax, 512)
+
+    lengths = torch.tensor(
+        [emb.shape[0] for emb in tf_emb_list],
+        dtype=torch.long,
+    )
+
+    Lmax = prot_batch.shape[1]
+
+    # True means "masked/padded position"
+    protein_mask = torch.arange(Lmax).unsqueeze(0) >= lengths.unsqueeze(1)
+
+    return dna_batch, prot_batch, protein_mask, labels, tf_idx
 
 
 # ============================================================
@@ -295,9 +321,11 @@ class TFBindDataModule(pl.LightningDataModule):
             self.train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
+            pin_memory=True,
             num_workers=self.num_workers,
-            persistent_workers=False,
+            persistent_workers=self.num_workers > 0,
             collate_fn=tfbind_collate,
+            prefetch_factor=2,
         )
 
     def val_dataloader(self):
@@ -305,9 +333,11 @@ class TFBindDataModule(pl.LightningDataModule):
             self.val_dataset,
             batch_size=self.batch_size,
             shuffle=False,
+            pin_memory=True,
             num_workers=self.num_workers,
-            persistent_workers=False,
+            persistent_workers=self.num_workers > 0,
             collate_fn=tfbind_collate,
+            prefetch_factor=2,
         )
 
     def test_dataloader(self):
@@ -317,9 +347,11 @@ class TFBindDataModule(pl.LightningDataModule):
             self.test_dataset,
             batch_size=self.batch_size,
             shuffle=False,
+            pin_memory=True,
             num_workers=self.num_workers,
-            persistent_workers=False,
+            persistent_workers=self.num_workers > 0,
             collate_fn=tfbind_collate,
+            prefetch_factor=2,
         )
 
 

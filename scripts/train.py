@@ -19,7 +19,7 @@ from pytorch_lightning.callbacks import (
     EarlyStopping,
 )
 from pytorch_lightning.callbacks import TQDMProgressBar
-from pytorch_lightning.utilities import rank_zero_info, rank_zero_debug
+from pytorch_lightning.utilities import rank_zero_info
 
 # local modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -174,6 +174,9 @@ def main():
     dm.setup(stage="fit")
     steps_per_epoch = len(dm.train_dataloader())
     total_steps = steps_per_epoch * args.epochs
+    
+    rank_zero_info(f"  - Done setting up TFBindDataModule with {len(dm.train_dataloader()):,} training batches and {len(dm.val_dataloader()):,} validation batches")
+
 
     # Needed for pos_weight calculation
     dm.train_labels_npy = args.train_labels_npy
@@ -219,7 +222,7 @@ def main():
     # -------------------------------------------------------
     # W&B logger
     # -------------------------------------------------------
-    rank_zero_info("Setting up ")
+    rank_zero_info("Setting up Weights and Biases logger")
     wandb_logger = None
     if args.wandb_project:
         wandb_logger = WandbLogger(
@@ -232,15 +235,16 @@ def main():
     # -------------------------------------------------------
     # Trainer
     # -------------------------------------------------------
+    rank_zero_info("Setting up PyTorch Lightning Trainer...")
     trainer = pl.Trainer(
         max_epochs=args.epochs,
         precision=args.precision,
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        devices=4,
-        strategy="ddp_find_unused_parameters_true",
+        devices=1,
+        strategy="auto",
         logger=wandb_logger,
-        callbacks=[TQDMProgressBar(refresh_rate=2000)] + callbacks,
-        log_every_n_steps=2000,
+        callbacks=[TQDMProgressBar(refresh_rate=200)] + callbacks,
+        log_every_n_steps=200,
         gradient_clip_val=1.0,
         deterministic=True,
         default_root_dir=args.output_dir,
@@ -252,6 +256,7 @@ def main():
     # -------------------------------------------------------
     # TRAIN
     # -------------------------------------------------------
+    rank_zero_info("\nStarting training...\n")
     trainer.fit(model, datamodule=dm)
     rank_zero_info("\nTraining complete!\n")
 

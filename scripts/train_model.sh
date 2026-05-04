@@ -5,9 +5,9 @@
 #SBATCH --time=36:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:a100:4
-#SBATCH --ntasks-per-node=4
-#SBATCH -c 16
+#SBATCH --gres=gpu:a100:1
+#SBATCH --ntasks-per-node=1
+#SBATCH -c 12
 #SBATCH --mem=64G
 
 set -eo pipefail
@@ -94,9 +94,9 @@ srun python ${PROJECT_DIR}/scripts/train.py \
   --embedding_dir ${PROJECT_DIR}/data/tf_data/tf_embeddings_test \
   --epochs 20 \
   --batch_size 1024 \
-  --num_workers 1 \
+  --num_workers 4 \
   --lr 1e-4 \
   --neg_fraction 0.015 \
   --wandb_project tfbind-train \
-  --run_name tfbind_train_ddp \
+  --run_name tfbind_train_ddp_${SLURM_JOB_ID} \
   --output_dir ${PROJECT_DIR}/checkpoints/tfbind_train_ddp

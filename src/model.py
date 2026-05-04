@@ -35,7 +35,6 @@ from sklearn.metrics import (
 
 from src.architectures.binding_predictor import DNABindingPredictor
 
-
 # ================================================================
 # STEP-BASED WARMUP + COSINE LR
 # ================================================================
@@ -93,6 +92,9 @@ class LitDNABindingModel(pl.LightningModule):
 
         # Balanced sampling 
         self.loss_fn = nn.BCEWithLogitsLoss()
+        
+        self.val_auroc = BinaryAUROC()
+        self.val_auprc = BinaryAveragePrecision()
 
         self.val_logits = []
         self.val_targets = []
@@ -104,18 +106,6 @@ class LitDNABindingModel(pl.LightningModule):
 
 
     # ----------------------------------------------------------
-    def _pad_proteins(self, emb_list, device):
-        cleaned = [t.squeeze(0) if t.ndim == 3 else t for t in emb_list]
-        B = len(cleaned)
-        Lmax = max(t.shape[0] for t in cleaned)
-        D = cleaned[0].shape[1]
-        out = torch.zeros((B, Lmax, D), device=device)
-        mask = torch.ones((B, Lmax), dtype=torch.bool, device=device)
-        for i, t in enumerate(cleaned):
-            L = t.shape[0]
-            out[i, :L] = t
-            mask[i, :L] = False
-        return out, mask
 
 
     # ----------------------------------------------------------
@@ -146,27 +136,52 @@ class LitDNABindingModel(pl.LightningModule):
 
     # ----------------------------------------------------------
     def training_step(self, batch, batch_idx):
-        dna, tf_embs, labels, tf_idx = batch
-        prot, mask = self._pad_proteins(tf_embs, dna.device)
+        dna, prot, mask, labels, tf_idx = batch
+
+        prot = prot.to(dna.device, non_blocking=True)
+        mask = mask.to(dna.device, non_blocking=True)
+        labels = labels.to(dna.device, non_blocking=True)
+
         logits = self.model(dna, prot, protein_mask=mask).squeeze(-1)
         loss = self.loss_fn(logits, labels.float())
-        self.log("train/loss", loss, on_epoch=True, batch_size=dna.size(0), sync_dist=True)
+
+        self.log(
+            "train/loss",
+            loss,
+            on_epoch=True,
+            batch_size=dna.size(0),
+            sync_dist=False,
+        )
+
         return loss
 
 
     # ----------------------------------------------------------
     def validation_step(self, batch, batch_idx):
-        dna, tf_embs, labels, tf_idx = batch
-        prot, mask = self._pad_proteins(tf_embs, dna.device)
+        dna, prot, mask, labels, tf_idx = batch
+
+        prot = prot.to(dna.device, non_blocking=True)
+        mask = mask.to(dna.device, non_blocking=True)
+        labels = labels.to(dna.device, non_blocking=True)
+
         logits = self.model(dna, prot, protein_mask=mask).squeeze(-1)
 
         loss = self.loss_fn(logits, labels.float())
-        self.log("val/loss", loss, on_epoch=True, prog_bar=True, batch_size=dna.size(0), sync_dist=True)
+        self.log(
+            "val/loss",
+            loss,
+            on_epoch=True,
+            prog_bar=True,
+            batch_size=dna.size(0),
+            sync_dist=False,
+        )
 
-        self.val_logits.append(torch.sigmoid(logits).detach().cpu())
-        self.val_targets.append(labels.detach().cpu())
+        probs = torch.sigmoid(logits)
+
+        self.val_auroc.update(probs.detach(), labels.int())
+        self.val_auprc.update(probs.detach(), labels.int())
+
         return loss
-
 
     # ----------------------------------------------------------
     # VALIDATION — threshold sweep + PR/ROC logging
@@ -182,32 +197,35 @@ class LitDNABindingModel(pl.LightningModule):
         self.val_targets.clear()
 
         # AUROC / AUPRC
-        auroc = BinaryAUROC()(probs, targets)
-        auprc = BinaryAveragePrecision()(probs, targets)
-        self.log("val/roc_auc", auroc, prog_bar=True, sync_dist=True)
-        self.log("val/pr_auc", auprc, prog_bar=True, sync_dist=True)
+        auroc = self.val_auroc.compute()
+        auprc = self.val_auprc.compute()
+
+        self.log("val/roc_auc", auroc, prog_bar=True)
+        self.log("val/pr_auc", auprc, prog_bar=True)
+
+        self.val_auroc.reset()
+        self.val_auprc.reset()
 
         # Threshold sweep
-        thresholds = torch.linspace(0.0, 0.3, steps=301)
-        eps = 1e-8
-        best_f1 = 0.0
-        best_t = 0.0
-        best_p = 0.0
-        best_r = 0.0
+        thresholds = torch.linspace(0.0, 0.3, steps=301, device=probs.device)
 
-        for t in thresholds:
-            preds = (probs >= t).int()
-            tp = ((preds == 1) & (targets == 1)).sum().float()
-            fp = ((preds == 1) & (targets == 0)).sum().float()
-            fn = ((preds == 0) & (targets == 1)).sum().float()
-            precision = tp / (tp + fp + eps)
-            recall = tp / (tp + fn + eps)
-            f1 = 2 * precision * recall / (precision + recall + eps)
-            if f1 > best_f1:
-                best_f1 = f1
-                best_t = float(t)
-                best_p = float(precision)
-                best_r = float(recall)
+        preds = probs[:, None] >= thresholds[None, :]
+        targets_bool = targets.bool()[:, None]
+
+        tp = (preds & targets_bool).sum(dim=0).float()
+        fp = (preds & ~targets_bool).sum(dim=0).float()
+        fn = (~preds & targets_bool).sum(dim=0).float()
+
+        precision = tp / (tp + fp + 1e-8)
+        recall = tp / (tp + fn + 1e-8)
+        f1 = 2 * precision * recall / (precision + recall + 1e-8)
+
+        best_idx = torch.argmax(f1)
+
+        best_f1 = f1[best_idx]
+        best_t = thresholds[best_idx]
+        best_p = precision[best_idx]
+        best_r = recall[best_idx]
 
         self.best_threshold = best_t
         self.log("val/best_f1", best_f1, prog_bar=True, sync_dist=True)
@@ -235,26 +253,28 @@ class LitDNABindingModel(pl.LightningModule):
 # TEST
 # ----------------------------------------------------------
     def test_step(self, batch, batch_idx):
-        dna, tf_embs, labels, tf_idx = batch
+        dna, prot, mask, labels, tf_idx = batch
 
-        # pad proteins
-        prot, mask = self._pad_proteins(tf_embs, dna.device)
+        prot = prot.to(dna.device, non_blocking=True)
+        mask = mask.to(dna.device, non_blocking=True)
+        labels = labels.to(dna.device, non_blocking=True)
 
-        # forward
         logits = self.model(dna, prot, protein_mask=mask).squeeze(-1)
-
-        # probabilities
         probs = torch.sigmoid(logits)
 
-        # store
         self.test_probs.append(probs.detach().cpu())
         self.test_targets.append(labels.detach().cpu())
 
-        # loss
         loss = self.loss_fn(logits, labels.float())
 
-        # log
-        self.log("test/loss", loss, on_step=False, on_epoch=True, sync_dist=True)
+        self.log(
+            "test/loss",
+            loss,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=False,
+        )
+
         return loss
 
     
