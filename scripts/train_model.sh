@@ -2,13 +2,13 @@
 #SBATCH --job-name=train_tfbindformer
 #SBATCH --output=LOGS/train_tfbindformer/%x_%j.log
 #SBATCH --error=LOGS/train_tfbindformer/%x_%j.err
-#SBATCH --time=36:00:00
+#SBATCH --time=72:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:a100:1
+#SBATCH --gres=gpu:v100:1
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 12
-#SBATCH --mem=64G
+#SBATCH --mem=32G
 
 set -eo pipefail
 
@@ -26,11 +26,11 @@ export NVIDIA_TF32_OVERRIDE=1
 
 # --- Threading: set to match SLURM CPUs per task ---
 THREADS=${SLURM_CPUS_PER_TASK:-1}
-export OMP_NUM_THREADS=1
-export MKL_NUM_THREADS=1
-export OPENBLAS_NUM_THREADS=1
-export NUMEXPR_NUM_THREADS=1
-export BLIS_NUM_THREADS=1
+export OMP_NUM_THREADS=$THREADS
+export MKL_NUM_THREADS=$THREADS
+export OPENBLAS_NUM_THREADS=$THREADS
+export NUMEXPR_NUM_THREADS=$THREADS
+export BLIS_NUM_THREADS=$THREADS
 export KMP_AFFINITY=granularity=fine,compact,1,0
 
 # --- NCCL / networking overrides ---
@@ -94,7 +94,7 @@ srun --cpus-per-task=${SLURM_CPUS_PER_TASK} --cpu-bind=cores \
   --val_metadata_tsv ${PROJECT_DIR}/data/tf_data/metadata_tfbs.tsv \
   --embedding_dir ${PROJECT_DIR}/data/tf_data/tf_embeddings_test \
   --epochs 20 \
-  --batch_size 256 \
+  --batch_size 512 \
   --num_workers 1 \
   --lr 1e-4 \
   --neg_fraction 0.015 \

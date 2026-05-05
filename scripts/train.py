@@ -186,6 +186,11 @@ def main():
     # -------------------------------------------------------
     rank_zero_info("Setting up LitDNABindingModel...")
     model = LitDNABindingModel(
+        tf_embs_padded=dm.tf_embs_padded,
+        tf_masks=dm.tf_masks,
+        protein_in_dim=512,
+        d_model=128,
+        dropout=0.3,
         lr=args.lr,
         weight_decay=args.weight_decay,
         warmup_steps=args.warmup_steps,

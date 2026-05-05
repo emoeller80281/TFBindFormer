@@ -171,9 +171,8 @@ def build_sample_indices(labels, neg_fraction=0.001, seed=2024):
 # ============================================================
 
 class TFTargetDataset(Dataset):
-    def __init__(self, dna_data, tf_embs, labels, sample_indices):
+    def __init__(self, dna_data, labels, sample_indices):
         self.dna_data = torch.as_tensor(dna_data, dtype=torch.float32)
-        self.tf_embs = tf_embs
         self.labels = torch.as_tensor(labels, dtype=torch.float32)
         self.samples = sample_indices
 
@@ -184,11 +183,33 @@ class TFTargetDataset(Dataset):
         dna_i, tf_j = self.samples[idx]
 
         dna = self.dna_data[dna_i]
-        tf_emb = self.tf_embs[tf_j]
         label = self.labels[dna_i, tf_j]
 
-        return dna, tf_emb, label, tf_j
+        return dna, label, tf_j
 
+def prepad_tf_embeddings(tf_embs):
+    clean_embs = []
+    lengths = []
+
+    for emb in tf_embs:
+        if emb.ndim == 3:
+            emb = emb.squeeze(0)
+        emb = emb.float().contiguous()
+        clean_embs.append(emb)
+        lengths.append(emb.shape[0])
+
+    padded = pad_sequence(
+        clean_embs,
+        batch_first=True,
+        padding_value=0.0,
+    )  # (num_tfs, Lmax, emb_dim)
+
+    lengths = torch.tensor(lengths, dtype=torch.long)
+
+    Lmax = padded.shape[1]
+    mask = torch.arange(Lmax).unsqueeze(0) >= lengths.unsqueeze(1)
+
+    return padded, mask, lengths
 
 # ============================================================
 # 5. COLLATE FUNCTION
@@ -196,34 +217,11 @@ class TFTargetDataset(Dataset):
 
 
 def tfbind_collate(batch):
-    dna_batch = torch.stack([x[0] for x in batch])  # (B, 1000, 4)
+    dna_batch = torch.stack([x[0] for x in batch])
+    labels = torch.stack([x[1] for x in batch]).float()
+    tf_idx = torch.tensor([x[2] for x in batch], dtype=torch.long)
 
-    tf_emb_list = [
-        x[1].squeeze(0) if x[1].ndim == 3 else x[1]
-        for x in batch
-    ]
-
-    labels = torch.tensor([x[2] for x in batch], dtype=torch.float32)
-    tf_idx = torch.tensor([x[3] for x in batch], dtype=torch.long)
-
-    # Pad TF embeddings on CPU inside DataLoader workers
-    prot_batch = pad_sequence(
-        tf_emb_list,
-        batch_first=True,
-        padding_value=0.0,
-    )  # (B, Lmax, 512)
-
-    lengths = torch.tensor(
-        [emb.shape[0] for emb in tf_emb_list],
-        dtype=torch.long,
-    )
-
-    Lmax = prot_batch.shape[1]
-
-    # True means "masked/padded position"
-    protein_mask = torch.arange(Lmax).unsqueeze(0) >= lengths.unsqueeze(1)
-
-    return dna_batch, prot_batch, protein_mask, labels, tf_idx
+    return dna_batch, labels, tf_idx
 
 
 # ============================================================
@@ -262,6 +260,8 @@ class TFBindDataModule(pl.LightningDataModule):
         self.neg_fraction = neg_fraction
         self.num_workers = num_workers
         #self.limit_examples = limit_examples
+        
+        self.tf_embs_padded, self.tf_masks, self.tf_lengths = prepad_tf_embeddings(self.tf_embs)
 
     
     # -------------------------------------------------------
@@ -278,8 +278,7 @@ class TFBindDataModule(pl.LightningDataModule):
                 neg_fraction=self.neg_fraction
             )
             self.train_dataset = TFTargetDataset(
-                self.train_dna, self.tf_embs,
-                self.train_labels, train_pairs
+                self.train_dna, self.train_labels, train_pairs
             )
 
             # ---- Validation ----
@@ -288,8 +287,7 @@ class TFBindDataModule(pl.LightningDataModule):
                 neg_fraction=0.08
             )
             self.val_dataset = TFTargetDataset(
-                self.val_dna, self.tf_embs,
-                self.val_labels, val_pairs
+                self.val_dna, self.val_labels, val_pairs
             )
 
         # ----------------------------
@@ -304,8 +302,7 @@ class TFBindDataModule(pl.LightningDataModule):
                     neg_fraction=1.0      # sample all positives + all negatives
                 )
                 self.test_dataset = TFTargetDataset(
-                    self.test_dna, self.tf_embs,
-                    self.test_labels, test_pairs
+                    self.test_dna, self.test_labels, test_pairs
                 )
             else:
                 print("[INFO] No test dataset provided.")
@@ -394,11 +391,11 @@ class TFBindDataModule(pl.LightningDataModule):
         # ---------------------------------------------------
         # Build datasets
         # ---------------------------------------------------
-        self.train_dataset = TFTargetDataset(self.train_dna, self.tf_embs, self.train_labels, train_pairs)
-        self.val_dataset   = TFTargetDataset(self.val_dna,   self.tf_embs, self.val_labels,   val_pairs)
+        self.train_dataset = TFTargetDataset(self.train_dna, self.train_labels, train_pairs)
+        self.val_dataset   = TFTargetDataset(self.val_dna,   self.val_labels,   val_pairs)
 
         if self.test_dna is not None:
-            self.test_dataset = TFTargetDataset(self.test_dna, self.tf_embs, self.test_labels, test_pairs)
+            self.test_dataset = TFTargetDataset(self.test_dna, self.test_labels, test_pairs)
         else:
             self.test_dataset = None
 
