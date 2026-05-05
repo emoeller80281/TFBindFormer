@@ -101,8 +101,8 @@ class LitDNABindingModel(pl.LightningModule):
 
         self.loss_fn = nn.BCEWithLogitsLoss()
 
-        self.val_auroc = BinaryAUROC()
-        self.val_auprc = BinaryAveragePrecision()
+        self.val_auroc = BinaryAUROC(sync_on_compute=True)
+        self.val_auprc = BinaryAveragePrecision(sync_on_compute=True)
 
         self.val_logits = []
         self.val_targets = []
@@ -203,18 +203,24 @@ class LitDNABindingModel(pl.LightningModule):
         self.val_targets.clear()
     
     def on_validation_epoch_end(self):
-        total_epoch_time = sum(self._batch_times)
-        self._batch_times = []
-        
-        self.log(
-            "train/epoch_step_time_min",
-            total_epoch_time / 60.0,
-            on_epoch=True,
-            prog_bar=True,
-            sync_dist=True,
-        )
-        
-        
+        if self._batch_times:
+            total_epoch_time = sum(self._batch_times)
+            self._batch_times = []
+
+            epoch_time_min = torch.tensor(
+                total_epoch_time / 60.0,
+                device=self.device,
+                dtype=torch.float32,
+            )
+
+            self.log(
+                "train/epoch_train_time_min",
+                epoch_time_min,
+                on_epoch=True,
+                prog_bar=True,
+                sync_dist=True,
+            )
+
         if not self.val_logits:
             return
 
@@ -224,17 +230,15 @@ class LitDNABindingModel(pl.LightningModule):
         self.val_logits.clear()
         self.val_targets.clear()
 
-        # AUROC / AUPRC
         auroc = self.val_auroc.compute()
         auprc = self.val_auprc.compute()
 
-        self.log("val/roc_auc", auroc, prog_bar=True)
-        self.log("val/pr_auc", auprc, prog_bar=True)
+        self.log("val/roc_auc", auroc, prog_bar=True, sync_dist=False)
+        self.log("val/pr_auc", auprc, prog_bar=True, sync_dist=False)
 
         self.val_auroc.reset()
         self.val_auprc.reset()
 
-        # Threshold sweep
         thresholds = torch.linspace(0.0, 0.3, steps=301, device=probs.device)
 
         preds = probs[:, None] >= thresholds[None, :]
@@ -250,31 +254,27 @@ class LitDNABindingModel(pl.LightningModule):
 
         best_idx = torch.argmax(f1)
 
-        best_f1 = f1[best_idx]
-        best_t = thresholds[best_idx]
-        best_p = precision[best_idx]
-        best_r = recall[best_idx]
+        self.best_threshold = thresholds[best_idx]
 
-        self.best_threshold = best_t
-        self.log("val/best_f1", best_f1, prog_bar=True, sync_dist=True)
-        self.log("val/best_precision", best_p, sync_dist=True)
-        self.log("val/best_recall", best_r, sync_dist=True)
-        self.log("val/best_threshold", best_t, sync_dist=True)
+        self.log("val/best_f1", f1[best_idx].to(self.device), prog_bar=True, sync_dist=False)
+        self.log("val/best_precision", precision[best_idx].to(self.device), sync_dist=False)
+        self.log("val/best_recall", recall[best_idx].to(self.device), sync_dist=False)
+        self.log("val/best_threshold", thresholds[best_idx].to(self.device), sync_dist=False)
 
-        # PR / ROC curves to W&B
-        try:
-            p_np = probs.numpy()
-            y_np = targets.numpy()
+        if self.trainer.is_global_zero:
+            try:
+                p_np = probs.detach().cpu().numpy()
+                y_np = targets.detach().cpu().numpy()
 
-            pre, rec, _ = precision_recall_curve(y_np, p_np)
-            fpr, tpr, _ = roc_curve(y_np, p_np)
+                pre, rec, _ = precision_recall_curve(y_np, p_np)
+                fpr, tpr, _ = roc_curve(y_np, p_np)
 
-            self.logger.experiment.log({
-                "val/pr_curve": wandb.plot.line_series([rec], [pre], keys=["precision"], xname="Recall"),
-                "val/roc_curve": wandb.plot.line_series([fpr], [tpr], keys=["TPR"], xname="FPR"),
-            })
-        except Exception as e:
-            print("[WARN] PR/ROC curve error:", e)
+                self.logger.experiment.log({
+                    "val/pr_curve": wandb.plot.line_series([rec], [pre], keys=["precision"], xname="Recall"),
+                    "val/roc_curve": wandb.plot.line_series([fpr], [tpr], keys=["TPR"], xname="FPR"),
+                })
+            except Exception as e:
+                print("[WARN] PR/ROC curve error:", e)
 
 
 
@@ -296,7 +296,7 @@ class LitDNABindingModel(pl.LightningModule):
             loss,
             on_step=False,
             on_epoch=True,
-            sync_dist=False,
+            sync_dist=True,
         )
 
         return loss
@@ -307,7 +307,8 @@ class LitDNABindingModel(pl.LightningModule):
     
     #macro metrices
     def on_test_epoch_end(self):
-        
+        if not self.trainer.is_global_zero:
+            return
 
         parent_dir = "eval_out"
         data_dir = os.path.join(parent_dir, "metrics_data")
@@ -315,6 +316,7 @@ class LitDNABindingModel(pl.LightningModule):
 
         os.makedirs(data_dir, exist_ok=True)
         os.makedirs(out_dir, exist_ok=True)
+
 
         # --------------------------------------------------
         # Collect predictions

@@ -10,12 +10,15 @@
 # ============================================================
 
 import os
+from pathlib import Path
+from filelock import FileLock
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 import pytorch_lightning as pl
 
 from torch.nn.utils.rnn import pad_sequence
+from pytorch_lightning.utilities import rank_zero_info
 
 
 # ============================================================
@@ -172,8 +175,8 @@ def build_sample_indices(labels, neg_fraction=0.001, seed=2024):
 
 class TFTargetDataset(Dataset):
     def __init__(self, dna_data, labels, sample_indices):
-        self.dna_data = torch.as_tensor(dna_data, dtype=torch.float32)
-        self.labels = torch.as_tensor(labels, dtype=torch.float32)
+        self.dna_data = dna_data
+        self.labels = labels
         self.samples = sample_indices
 
     def __len__(self):
@@ -182,10 +185,10 @@ class TFTargetDataset(Dataset):
     def __getitem__(self, idx):
         dna_i, tf_j = self.samples[idx]
 
-        dna = self.dna_data[dna_i]
-        label = self.labels[dna_i, tf_j]
+        dna = torch.from_numpy(self.dna_data[dna_i].copy())
+        label = torch.tensor(self.labels[dna_i, tf_j], dtype=torch.float32)
 
-        return dna, label, tf_j
+        return dna, label, int(tf_j)
 
 def prepad_tf_embeddings(tf_embs):
     clean_embs = []
@@ -232,80 +235,100 @@ def tfbind_collate(batch):
 class TFBindDataModule(pl.LightningDataModule):
     def __init__(
         self,
-        train_dna, train_labels,
-        val_dna, val_labels,
-        test_dna=None, test_labels=None,   # <-- now optional
+        train_dna,
+        train_labels,
+        val_dna,
+        val_labels,
+        test_dna=None,
+        test_labels=None,
         tf_embs=None,
+        tf_embs_padded=None,
+        tf_masks=None,
+        train_pairs=None,
+        val_pairs=None,
+        test_pairs=None,
         batch_size=128,
         neg_fraction=0.01,
         num_workers=4,
-        #Slimit_examples=None,
     ):
         super().__init__()
 
-        # Required splits
         self.train_dna = train_dna
         self.train_labels = train_labels
-
         self.val_dna = val_dna
         self.val_labels = val_labels
 
-        # Optional test split
         self.test_dna = test_dna
         self.test_labels = test_labels
 
         self.tf_embs = tf_embs
+        self.tf_embs_padded = tf_embs_padded
+        self.tf_masks = tf_masks
+
+        self.train_pairs = train_pairs
+        self.val_pairs = val_pairs
+        self.test_pairs = test_pairs
 
         self.batch_size = batch_size
         self.neg_fraction = neg_fraction
         self.num_workers = num_workers
-        #self.limit_examples = limit_examples
         
-        self.tf_embs_padded, self.tf_masks, self.tf_lengths = prepad_tf_embeddings(self.tf_embs)
+
+        self.tf_lengths = None
+        
+        if self.tf_embs_padded is None or self.tf_masks is None:
+            if self.tf_embs is None:
+                raise ValueError(
+                    "Either provide tf_embs_padded/tf_masks from cache or provide raw tf_embs."
+                )
+
+            self.tf_embs_padded, self.tf_masks, self.tf_lengths = prepad_tf_embeddings(
+                self.tf_embs
+            )
 
     
     # -------------------------------------------------------
     
     def setup(self, stage=None):
-
-        # ----------------------------
-        # TRAINING (fit)
-        # ----------------------------
         if stage in ("fit", None):
-            # ---- Train ----
-            train_pairs = build_sample_indices(
-                self.train_labels,
-                neg_fraction=self.neg_fraction
-            )
+            if self.train_pairs is None:
+                self.train_pairs = build_sample_indices(
+                    self.train_labels,
+                    neg_fraction=self.neg_fraction,
+                )
+
+            if self.val_pairs is None:
+                self.val_pairs = build_sample_indices(
+                    self.val_labels,
+                    neg_fraction=0.08,
+                )
+
             self.train_dataset = TFTargetDataset(
-                self.train_dna, self.train_labels, train_pairs
+                self.train_dna,
+                self.train_labels,
+                self.train_pairs,
             )
 
-            # ---- Validation ----
-            val_pairs = build_sample_indices(
-                self.val_labels,
-                neg_fraction=0.08
-            )
             self.val_dataset = TFTargetDataset(
-                self.val_dna, self.val_labels, val_pairs
+                self.val_dna,
+                self.val_labels,
+                self.val_pairs,
             )
 
-        # ----------------------------
-        # TESTING (test)
-        # ----------------------------
         if stage in ("test", None):
             if self.test_dna is not None and self.test_labels is not None:
-                print("[INFO] Building TEST dataset (neg_fraction=1.0)")
+                if self.test_pairs is None:
+                    self.test_pairs = build_sample_indices(
+                        self.test_labels,
+                        neg_fraction=1.0,
+                    )
 
-                test_pairs = build_sample_indices(
-                    self.test_labels,
-                    neg_fraction=1.0      # sample all positives + all negatives
-                )
                 self.test_dataset = TFTargetDataset(
-                    self.test_dna, self.test_labels, test_pairs
+                    self.test_dna,
+                    self.test_labels,
+                    self.test_pairs,
                 )
             else:
-                print("[INFO] No test dataset provided.")
                 self.test_dataset = None
 
     
@@ -401,3 +424,64 @@ class TFBindDataModule(pl.LightningDataModule):
 
     
 '''   
+
+def get_or_build_training_cache(
+    cache_path,
+    train_labels,
+    val_labels,
+    tf_names,
+    embedding_dir,
+    neg_fraction,
+    seed=2024,
+    force_rebuild=False,
+):
+    cache_path = Path(cache_path)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+    lock_path = str(cache_path) + ".lock"
+
+    with FileLock(lock_path):
+        if cache_path.exists() and not force_rebuild:
+            rank_zero_info(f"Loading dataloader cache from: {cache_path}")
+            return torch.load(cache_path, map_location="cpu", weights_only=False)
+
+        rank_zero_info(f"Building dataloader cache: {cache_path}")
+
+        tf_embs, canon_names = load_tf_embeddings_in_label_order(
+            tf_names,
+            embedding_dir,
+        )
+
+        tf_embs_padded, tf_masks, tf_lengths = prepad_tf_embeddings(tf_embs)
+
+        train_pairs = build_sample_indices(
+            train_labels,
+            neg_fraction=neg_fraction,
+            seed=seed,
+        )
+
+        val_pairs = build_sample_indices(
+            val_labels,
+            neg_fraction=0.08,
+            seed=seed,
+        )
+
+        cache = {
+            "train_pairs": train_pairs,
+            "val_pairs": val_pairs,
+            "tf_embs_padded": tf_embs_padded.cpu(),
+            "tf_masks": tf_masks.cpu(),
+            "tf_lengths": tf_lengths.cpu(),
+            "canon_names": canon_names,
+            "neg_fraction": neg_fraction,
+            "seed": seed,
+            "train_labels_shape": tuple(train_labels.shape),
+            "val_labels_shape": tuple(val_labels.shape),
+        }
+
+        tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+        torch.save(cache, tmp_path)
+        os.replace(tmp_path, cache_path)
+
+        rank_zero_info(f"Saved dataloader cache to: {cache_path}")
+        return cache

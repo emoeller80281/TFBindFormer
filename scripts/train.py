@@ -3,6 +3,7 @@
 Train GLOBAL TF–DNA Binding Predictor
 """
 
+import hashlib
 import os, sys, random, argparse, gc
 
 import numpy as np
@@ -27,6 +28,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.utils import (
     TFBindDataModule,
     load_tf_embeddings_in_label_order,
+    get_or_build_training_cache,
 )
 from src.model import LitDNABindingModel
 
@@ -62,10 +64,20 @@ logging.basicConfig(
 ########################################
 # Deterministic Behavior
 ########################################
-torch.set_float32_matmul_precision("medium")
-torch.backends.cudnn.benchmark = False
-torch.backends.cudnn.deterministic = True
-torch.use_deterministic_algorithms(True, warn_only=True)
+# Determine world size early (SLURM / env). For multi-process DDP runs,
+# enforcing strict deterministic algorithms can substantially slow down
+# kernels. Enable deterministic mode only for single-process runs.
+_early_world_size = int(os.environ.get("WORLD_SIZE", os.environ.get("SLURM_NTASKS", "1")))
+if _early_world_size <= 1:
+    torch.set_float32_matmul_precision("medium")
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = True
+    torch.use_deterministic_algorithms(True, warn_only=True)
+else:
+    torch.set_float32_matmul_precision("medium")
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False
+    torch.use_deterministic_algorithms(False, warn_only=True)
 
 SEED = 42
 torch.manual_seed(SEED)
@@ -83,7 +95,7 @@ torch.cuda.empty_cache()
 ###########################################################
 def parse_args():
     parser = argparse.ArgumentParser(description="Train GLOBAL TF-DNA Binding Predictor")
-
+    
     # dataset paths
     parser.add_argument("--train_dna_npy", type=str, required=True)
     parser.add_argument("--train_labels_npy", type=str, required=True)
@@ -98,8 +110,23 @@ def parse_args():
     parser.add_argument("--test_metadata_tsv", type=str, default=None)
 
     parser.add_argument("--embedding_dir", type=str, required=True)
+    
+    parser.add_argument(
+        "--cache_dir", 
+        type=str, 
+        default="./cache", 
+        help="Directory to store cached sample indices and TF embedding tensors."
+    )
+    parser.add_argument(
+        "--force_rebuild_cache", 
+        action="store_true", 
+        help="Rebuild cached sample indices and TF embedding tensors.")
 
     # training parameters
+    parser.add_argument("--d_model", type=int, default=128, help="Dimension of the model")
+    parser.add_argument("--dropout", type=float, default=0.3, help="Dropout rate")
+    parser.add_argument("--devices", type=int, default=1, help="Number of GPU devices to use")
+    parser.add_argument("--num_nodes", type=int, default=1, help="Number of nodes to use for distributed training")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=128)
 
@@ -120,6 +147,10 @@ def parse_args():
 
     return parser.parse_args()
 
+def short_hash(*items):
+    text = "|".join(map(str, items))
+    return hashlib.md5(text.encode()).hexdigest()[:10]
+
 
 ###########################################################
 # MAIN
@@ -128,17 +159,18 @@ def main():
     args = parse_args()
     pl.seed_everything(args.seed, workers=True)
     os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(args.cache_dir, exist_ok=True)
 
     # -------------------------------------------------------
     # Load datasets (.npy)
     # -------------------------------------------------------
     logging.debug("Loading .npy datasets...")
 
-    train_dna = np.load(args.train_dna_npy, mmap_mode="r")
-    train_labels = np.load(args.train_labels_npy, mmap_mode="r")
+    train_dna = np.load(args.train_dna_npy, mmap_mode="r").astype(np.float32, copy=False)
+    val_dna = np.load(args.val_dna_npy, mmap_mode="r").astype(np.float32, copy=False)
 
-    val_dna = np.load(args.val_dna_npy, mmap_mode="r")
-    val_labels = np.load(args.val_labels_npy, mmap_mode="r")
+    train_labels = np.load(args.train_labels_npy, mmap_mode="r").astype(np.float32, copy=False)
+    val_labels = np.load(args.val_labels_npy, mmap_mode="r").astype(np.float32, copy=False)
 
     #test_dna = np.load(args.test_dna_npy, mmap_mode="r") if args.test_dna_npy else None
     #test_labels = np.load(args.test_labels_npy, mmap_mode="r") if args.test_labels_npy else None
@@ -149,26 +181,43 @@ def main():
     rank_zero_info("Loading metadata...")
     meta = pd.read_csv(args.train_metadata_tsv, sep="\t")
     tf_names = meta["TF/DNase/HistoneMark"].tolist()
+    
+    dataset_hash = short_hash(
+        args.train_labels_npy,
+        args.val_labels_npy,
+        args.train_metadata_tsv,
+        args.embedding_dir,
+    )
 
-    rank_zero_info("Loading TF embeddings...")
-    tf_embs, canon_names = load_tf_embeddings_in_label_order(tf_names, args.embedding_dir)
+    cache_path = os.path.join(
+        args.cache_dir,
+        f"tfbind_cache_{dataset_hash}_seed{args.seed}_neg{args.neg_fraction}.pt",
+    )
 
-    # -------------------------------------------------------
-    # DataModule
-    # -------------------------------------------------------
-    rank_zero_info("Setting up TFBindDataModule...")
+    cache = get_or_build_training_cache(
+        cache_path=cache_path,
+        train_labels=train_labels,
+        val_labels=val_labels,
+        tf_names=tf_names,
+        embedding_dir=args.embedding_dir,
+        neg_fraction=args.neg_fraction,
+        seed=args.seed,
+        force_rebuild=getattr(args, "force_rebuild_cache", False),
+    )
+
+    rank_zero_info("Setting up TFBindDataModule from cached sample pairs...")
+
     dm = TFBindDataModule(
         train_dna=train_dna,
         train_labels=train_labels,
         val_dna=val_dna,
         val_labels=val_labels,
-        #test_dna=test_dna,
-        #test_labels=test_labels,
-        tf_embs=tf_embs,
+        tf_embs_padded=cache["tf_embs_padded"],
+        tf_masks=cache["tf_masks"],
+        train_pairs=cache["train_pairs"],
+        val_pairs=cache["val_pairs"],
         batch_size=args.batch_size,
-        neg_fraction=args.neg_fraction,
         num_workers=args.num_workers,
-        #limit_examples=20,
     )
 
     dm.setup(stage="fit")
@@ -186,15 +235,15 @@ def main():
     # -------------------------------------------------------
     rank_zero_info("Setting up LitDNABindingModel...")
     model = LitDNABindingModel(
-        tf_embs_padded=dm.tf_embs_padded,
-        tf_masks=dm.tf_masks,
+        tf_embs_padded=cache["tf_embs_padded"],
+        tf_masks=cache["tf_masks"],
         protein_in_dim=512,
-        d_model=128,
-        dropout=0.3,
+        d_model=args.d_model,
+        dropout=args.dropout,
         lr=args.lr,
         weight_decay=args.weight_decay,
         warmup_steps=args.warmup_steps,
-        total_steps=total_steps,     
+        total_steps=total_steps,
     )
 
 
@@ -221,7 +270,7 @@ def main():
             mode="min",
             patience=5,
         ),
-        LearningRateMonitor(logging_interval="epoch"),
+        LearningRateMonitor(logging_interval="step"),
     ]
 
     # -------------------------------------------------------
@@ -240,18 +289,28 @@ def main():
     # -------------------------------------------------------
     # Trainer
     # -------------------------------------------------------
-    rank_zero_info("Setting up PyTorch Lightning Trainer...")
+    world_size = int(
+        os.environ.get(
+            "WORLD_SIZE",
+            os.environ.get("SLURM_NTASKS", "1"),
+        )
+    )
+
+    use_ddp = world_size > 1
+    
+    rank_zero_info("Setting up PyTorch Lightning Trainer...")    
     trainer = pl.Trainer(
         max_epochs=args.epochs,
         precision=args.precision,
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        devices=1,
-        strategy="auto",
+        devices=args.devices,
+        num_nodes=args.num_nodes,
+        strategy="ddp_find_unused_parameters_true" if use_ddp else "auto",
         logger=wandb_logger,
         callbacks=[TQDMProgressBar(refresh_rate=200)] + callbacks,
         log_every_n_steps=200,
         gradient_clip_val=1.0,
-        deterministic=True,
+        deterministic=(not use_ddp),
         default_root_dir=args.output_dir,
         enable_progress_bar=True,
         enable_checkpointing=True,

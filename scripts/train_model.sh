@@ -8,7 +8,7 @@
 #SBATCH --gres=gpu:v100:1
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 12
-#SBATCH --mem=32G
+#SBATCH --mem=128G
 
 set -eo pipefail
 
@@ -26,11 +26,11 @@ export NVIDIA_TF32_OVERRIDE=1
 
 # --- Threading: set to match SLURM CPUs per task ---
 THREADS=${SLURM_CPUS_PER_TASK:-1}
-export OMP_NUM_THREADS=$THREADS
-export MKL_NUM_THREADS=$THREADS
-export OPENBLAS_NUM_THREADS=$THREADS
-export NUMEXPR_NUM_THREADS=$THREADS
-export BLIS_NUM_THREADS=$THREADS
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export BLIS_NUM_THREADS=1
 export KMP_AFFINITY=granularity=fine,compact,1,0
 
 # --- NCCL / networking overrides ---
@@ -49,8 +49,7 @@ ip -o -4 addr show "$IFACE"
 export NCCL_SOCKET_IFNAME="$IFACE"
 export GLOO_SOCKET_IFNAME="$IFACE"
 
-# (keep InfiniBand disabled if IB isn’t properly configured)
-export NCCL_IB_DISABLE=1
+export NCCL_IB_DISABLE=0
 
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
@@ -83,21 +82,30 @@ echo "[NET] MASTER_NODE=${MASTER_NODE}, IFACE=${IFACE:-<unset>}"
 NPROC_PER_NODE=${SLURM_GPUS_ON_NODE:-$(nvidia-smi -L | wc -l)}
 echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
 
-# Launch torchrun on ALL nodes / tasks via srun
+# Launch via torchrun (one process per GPU)
 srun --cpus-per-task=${SLURM_CPUS_PER_TASK} --cpu-bind=cores \
-  python ${PROJECT_DIR}/scripts/train.py \
-  --train_dna_npy ${PROJECT_DIR}/data/dna_data/train/train_oneHot.npy \
-  --train_labels_npy ${PROJECT_DIR}/data/dna_data/train/train_labels.npy \
-  --train_metadata_tsv ${PROJECT_DIR}/data/tf_data/metadata_tfbs.tsv \
-  --val_dna_npy ${PROJECT_DIR}/data/dna_data/val/valid_oneHot.npy \
-  --val_labels_npy ${PROJECT_DIR}/data/dna_data/val/valid_labels.npy \
-  --val_metadata_tsv ${PROJECT_DIR}/data/tf_data/metadata_tfbs.tsv \
-  --embedding_dir ${PROJECT_DIR}/data/tf_data/tf_embeddings_test \
-  --epochs 20 \
-  --batch_size 512 \
-  --num_workers 1 \
-  --lr 1e-4 \
-  --neg_fraction 0.015 \
-  --wandb_project tfbind-train \
-  --run_name tfbind_train_${SLURM_JOB_ID} \
-  --output_dir ${PROJECT_DIR}/checkpoints/tfbind_train
+  torchrun \
+    --nproc_per_node=${NPROC_PER_NODE} \
+    --nnodes=${SLURM_JOB_NUM_NODES} \
+    --rdzv_id=${SLURM_JOB_ID} \
+    --rdzv_backend=c10d \
+    --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} \
+    ${PROJECT_DIR}/scripts/train.py \
+      --train_dna_npy ${PROJECT_DIR}/data/dna_data/train/train_oneHot.npy \
+      --train_labels_npy ${PROJECT_DIR}/data/dna_data/train/train_labels.npy \
+      --train_metadata_tsv ${PROJECT_DIR}/data/tf_data/metadata_tfbs.tsv \
+      --val_dna_npy ${PROJECT_DIR}/data/dna_data/val/valid_oneHot.npy \
+      --val_labels_npy ${PROJECT_DIR}/data/dna_data/val/valid_labels.npy \
+      --val_metadata_tsv ${PROJECT_DIR}/data/tf_data/metadata_tfbs.tsv \
+      --embedding_dir ${PROJECT_DIR}/data/tf_data/tf_embeddings_test \
+      --devices 1 \
+      --num_nodes ${SLURM_JOB_NUM_NODES} \
+      --epochs 20 \
+      --batch_size 724 \
+      --num_workers 4 \
+      --lr 2e-4 \
+      --neg_fraction 0.015 \
+      --wandb_project tfbind-train \
+      --run_name tfbind_train_${SLURM_JOB_ID} \
+      --output_dir ${PROJECT_DIR}/checkpoints/tfbind_train \
+      --cache_dir ${PROJECT_DIR}/cache/tfbind_train
